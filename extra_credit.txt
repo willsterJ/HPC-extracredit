@@ -1,0 +1,17 @@
+Extra credit assignment.
+
+1. Using the unrolled loop dot product from lab1, implement matrix multiplication on CPU such that each value of the resulting matrix
+   is computed as an individual dot-product. Time it, calculate bandwidth and flops and place into roofline model as in lab1 for a
+   a pair of 1000x1000 matrices of floats initialized to a 'gray code' (chess board pattern) with values 0.2 and 0.6, [0][0] being 0.2.
+   (5 points)
+
+2. Using the tiling strategy shown in the class for GPUs, implement matrix multiplication decomposed into block matrices on CPU
+    of size NxN and measure varying tile sizes to show the impact of using O(N^3) subproblems that fit into the L1 or L2 cache.
+    I.e. there are at least 2 tile sizes measured and explanation about the choice.
+    Note that there are 3 tiles involved, 2 input tiles and one output tile into which the result is accumulated.
+    Bandwidth, Flops and point in roofline model for each tile choice.
+    (25 points)
+
+3. Measure the MKL matrix multiplication routine, calculate bandwidth and flops and add to the roofline model.
+    (5 points)
+    
