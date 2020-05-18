@@ -4,12 +4,12 @@
 #include <time.h>
 #include <math.h>
 
-#define N 1000
-#define BLOCK_DIM 250
+#define N 1000  // dimension of matrix
+#define BLOCK_DIM 100  // dimension of block
 
 /*
 Specs for Intel Xeon E5630:
-L1-cache: 128KB, so submatrix_A = 10x10
+L1-cache: 128KB, so submatrix_A = 100x100
 L2-cache: 1024KB, so submatrix_A = 250x250
 */
 
@@ -49,35 +49,6 @@ float** matrix_multiply(float **A, float **B_t, float **C){
   return C;
 }
 
-// naive method where submatrices are not copied. DO NOT USE
-float** matrix_multiply_tiling_naive(float **A, float **B_t, float **C){
-  int numBlocks = N / BLOCK_DIM;  // number of blocks in the width direction
-  int block_idx = 0;
-  int stride = BLOCK_DIM;
-  float R = 0;  // result stored by dot product
-
-  int row_ind = 0; 
-  int col_ind = 0;
-  for (int i=row_ind; i<stride && i<N; i++){
-    for (int j=col_ind; j<stride && j<N; j++){
-      R = 0;
-      for (int k=col_ind; k<stride && k<N; k++){  // dot product vect in row_vect_A with col_vect_B within block
-        R += A[i][k] * B_t[j][k];
-      }
-      C[i][j] += R;  // increment output element by partial dot vector result
-    }
-    block_idx++;  // go to next block
-
-    if (block_idx % numBlocks != 0) // go to next column block
-      col_ind += stride;
-    else{ // switch to next row set of column blocks
-      col_ind = 0;
-      row_ind += stride;
-    }
-  }
-  return C;
-}
-
 // matrix multiply using tiling
 float** matrix_multiply_tiling(float **A, float **B_t, float **C){
   int numBlocks = N / BLOCK_DIM;  // number of blocks in the width direction
@@ -87,8 +58,9 @@ float** matrix_multiply_tiling(float **A, float **B_t, float **C){
   float A_sub[BLOCK_DIM][BLOCK_DIM];
   float B_sub[BLOCK_DIM][BLOCK_DIM];
 
+  float R;
   int row_ind_start, col_ind_start;
-  for (int block=0; block<pow(numBlocks, 2); block++){  // loop through blocks in matrix C
+  for (int block=0; block<(numBlocks*numBlocks); block++){  // loop through blocks in matrix C
     // get starting indices according to block id
     row_ind_start = (block / numBlocks) * stride;
     col_ind_start = (block % numBlocks) * stride;
@@ -102,9 +74,11 @@ float** matrix_multiply_tiling(float **A, float **B_t, float **C){
     // dot product
     for (int i=0; i<stride; i++){
       for (int j=0; j<stride; j++){
+        R = 0;
         for (int k=0; k<stride; k++){
-          C[i+row_ind_start][j+col_ind_start] += A_sub[i][k] * B_sub[j][k];
+          R += A_sub[i][k] * B_sub[j][k];
         }
+        C[i+row_ind_start][j+col_ind_start] += R;
       }
     }
   }
@@ -132,7 +106,7 @@ int main(int argc, char *argv[]){
     }
   }
 
-  // transpose the matrix so that row vector in A and col vector in B are parallel
+  // transpose matrix B so that row vector in A and col vector in B are parallel
   transpose(B);
 
   double time, bandwidth, flops, ai;
@@ -147,14 +121,14 @@ int main(int argc, char *argv[]){
   time = (time + (end.tv_nsec - start.tv_nsec)) * 1e-9; // take into account nanoseconds passed, and convert from nanosecond to second
   // 8 memory references (4 bytes each) looped 250 times per dpunroll call
   // 1 memory reference per output C element access for entire NxN matrix
-  bandwidth = 8 * 4 * 250 * 1 * (double)(N * N) / time * 1e-9;
+  bandwidth = (8 * 250 + 1) * 4 * (double)(N * N) / time * 1e-9;
   // 8 FLOP looped 250 times per dpunroll call
   // dpunroll is called N*N times
   flops = 8 * 250 * (double)(N * N) / time * 1e-9;  // 8 flops 
   // 7 FLOP and 8 memory accesses looped 250 times
   //ai = (7 * 250) / (double)(8 * 4 * 250);
   ai = flops / bandwidth;
-  printf("dpunroll matrix specs:\n");
+  printf("dpunroll matrix results:\n");
   printf("time:%fsecs bandwidth:%fGB/s  flops:%fGFLOP/s  arithmetic_intensity:%fFLOP/byte\n", time, bandwidth, flops, ai);
 
 
@@ -171,18 +145,19 @@ int main(int argc, char *argv[]){
 
   time = (end.tv_sec - start.tv_sec) * 1e9; // convert seconds elapsed to nanoseconds
   time = (time + (end.tv_nsec - start.tv_nsec)) * 1e-9; // take into account nanoseconds passed, and convert from nanosecond to second
-  // BLOCK_DIM x BLOCK_DIM x 2 memory accesses when copying from matrix portion to submatrix
-  // BLOCK_DIM x BLOCK_DIM x BLOCK_DIM x 1 memory accesses for retriving and updating elements in C
+  // BLOCK_DIM x BLOCK_DIM x 2 memory accesses (4 bytes each) when copying from global matrix portion to local submatrix. x2 for matrix A and B
+  // BLOCK_DIM x BLOCK_DIM x BLOCK_DIM x 2 memory accesses for accessing the 2 submatrices
+  // BLOCK_DIM x BLOCK_DIM x 1 memory access for each element in matrix C (to update value)
+  // There are total of (N / BLOCK_DIM)^2 blocks in matrix C to be computed
+  bandwidth = ((double)BLOCK_DIM*BLOCK_DIM*2 + BLOCK_DIM*BLOCK_DIM*BLOCK_DIM*2 + BLOCK_DIM*BLOCK_DIM*1) * 4 * pow((N/BLOCK_DIM), 2) / time * 1e-9;
+  // There are BLOCK_DIM x BLOCK_DIM elements in each block in C
+  // 2 flop per dot-product component (+ and *) of which there are BLOCK_DIM components. 
+  // 1 flop for updating element in C
+  // Also additional 4 more from setting up row and col index (/ and %)
   // There are total of (N / BLOCK_DIM)^2 blocks for matrix C (i.e. the entire parent loop)
-  bandwidth = ((double)BLOCK_DIM*BLOCK_DIM*2 + BLOCK_DIM*BLOCK_DIM*BLOCK_DIM*1) * pow((N/BLOCK_DIM), 2) / time * 1e-9;
-  // BLOCK_DIM x BLOCK_DIM elements in block in C. Each element in block computes partial dot product of size BLOCK_DIM
-  // 3 flops per element-wise dot-product of which there are BLOCK_DIM
-  // There are total of (N / BLOCK_DIM)^2 blocks for matrix C (i.e. the entire parent loop)
-  flops = ((double)BLOCK_DIM*BLOCK_DIM * 2*BLOCK_DIM + 4) * pow((N/BLOCK_DIM), 2) / time * 1e-9;
-  // 3 FLOP and 3 memory accesses
-  //ai = 3 / (double)(4 * 3);
+  flops = ((double)BLOCK_DIM*BLOCK_DIM*BLOCK_DIM*2 + BLOCK_DIM*BLOCK_DIM*1 + 4) * pow((N/BLOCK_DIM), 2) / time * 1e-9;
   ai = flops/bandwidth;
-  printf("tiling matrix specs:\n");
+  printf("tiling matrix results:\n");
   printf("time:%fsecs bandwidth:%fGB/s  flops:%fGFLOP/s  arithmetic_intensity:%fFLOP/byte\n", time, bandwidth, flops, ai);
 
   // reset matrix C to 0
