@@ -49,8 +49,46 @@ float** matrix_multiply(float **A, float **B_t, float **C){
   return C;
 }
 
+// // matrix multiply using tiling. WRONG!!!
+// float** matrix_multiply_tiling_wrong(float **A, float **B_t, float **C){
+//   int numBlocks = N / BLOCK_DIM;  // number of blocks in the width direction
+//   int stride = BLOCK_DIM;
+
+//   // create submatrices
+//   float A_sub[BLOCK_DIM][BLOCK_DIM];
+//   float B_sub[BLOCK_DIM][BLOCK_DIM];
+
+//   float R;
+//   int row_ind_start, col_ind_start;
+//   for (int block=0; block<(numBlocks*numBlocks); block++){  // loop through blocks in matrix A
+
+//     // get starting indices according to block id
+//     row_ind_start = (block / numBlocks) * stride;
+//     col_ind_start = (block % numBlocks) * stride;
+//     // copy into submatrices
+//     for (int i=0; i<stride; i++){
+//       for (int j=0; j<stride; j++){
+//         A_sub[i][j] = A[i+row_ind_start][j+col_ind_start];
+//         B_sub[i][j] = B_t[i+row_ind_start][j+col_ind_start];
+//       }
+//     }
+
+//     // dot product for each element in block in C
+//     for (int i=0; i<stride; i++){
+//       for (int j=0; j<stride; j++){
+//         R = 0;
+//         for (int k=0; k<stride; k++){
+//           R += A_sub[i][k] * B_sub[j][k];
+//         }
+//         C[i+row_ind_start][j+col_ind_start] += R;
+//       }
+//     }
+//   }
+//   return C;
+// }
+
 // matrix multiply using tiling
-float** matrix_multiply_tiling(float **A, float **B_t, float **C){
+float** matrix_multiply_tiling(float **A, float **B, float **C){
   int numBlocks = N / BLOCK_DIM;  // number of blocks in the width direction
   int stride = BLOCK_DIM;
 
@@ -59,29 +97,43 @@ float** matrix_multiply_tiling(float **A, float **B_t, float **C){
   float B_sub[BLOCK_DIM][BLOCK_DIM];
 
   float R;
-  int row_ind_start, col_ind_start;
-  for (int block=0; block<(numBlocks*numBlocks); block++){  // loop through blocks in matrix C
-    // get starting indices according to block id
-    row_ind_start = (block / numBlocks) * stride;
-    col_ind_start = (block % numBlocks) * stride;
-    // copy into submatrices
+  int A_row_ind_start, A_col_ind_start, B_row_ind_start, B_col_ind_start;
+  // for all blocks in A
+  for (int A_block=0; A_block<(numBlocks*numBlocks); A_block++){
+    // get starting indices according to block id in matrix A
+    A_row_ind_start = (A_block / numBlocks) * stride;
+    A_col_ind_start = (A_block % numBlocks) * stride;
+
+    // copy into submatrix A
     for (int i=0; i<stride; i++){
       for (int j=0; j<stride; j++){
-        A_sub[i][j] = A[i+row_ind_start][j+col_ind_start];
-        B_sub[i][j] = B_t[i+row_ind_start][j+col_ind_start];
+        A_sub[i][j] = A[i+A_row_ind_start][j+A_col_ind_start];
       }
     }
-    // dot product
-    for (int i=0; i<stride; i++){
-      for (int j=0; j<stride; j++){
-        R = 0;
-        for (int k=0; k<stride; k++){
-          R += A_sub[i][k] * B_sub[j][k];
+    // for each block in row of B (row determined by column block of A)
+    for (int B_block=0; B_block<numBlocks; B_block++){
+      B_row_ind_start = (A_block % numBlocks) * stride; // row of B is determined by col of A
+      B_col_ind_start = B_block * stride; // all columns in this row
+
+      // copy into submatrix B
+      for (int i=0; i<stride; i++){
+        for (int j=0; j<stride; j++){
+          B_sub[i][j] = B[i+B_row_ind_start][j+B_col_ind_start];
         }
-        C[i+row_ind_start][j+col_ind_start] += R;
       }
-    }
-  }
+
+      // dot product for each element in block in C
+      for (int i=0; i<stride; i++){
+        for (int j=0; j<stride; j++){
+          R = 0;
+          for (int k=0; k<stride; k++){
+            R += A_sub[i][k] * B_sub[j][k];
+          }
+          C[i+A_row_ind_start][j+B_col_ind_start] += R;  // row determined by row of A, col determined by col of B
+        }
+      } // end dot product
+    } // end matrix B block iteration
+  } // end matrix A block iteration
   return C;
 }
 
@@ -145,17 +197,18 @@ int main(int argc, char *argv[]){
 
   time = (end.tv_sec - start.tv_sec) * 1e9; // convert seconds elapsed to nanoseconds
   time = (time + (end.tv_nsec - start.tv_nsec)) * 1e-9; // take into account nanoseconds passed, and convert from nanosecond to second
-  // BLOCK_DIM x BLOCK_DIM x 2 memory accesses (4 bytes each) when copying from global matrix portion to local submatrix. x2 for matrix A and B
-  // BLOCK_DIM x BLOCK_DIM x BLOCK_DIM x 2 memory accesses for accessing the 2 submatrices
-  // BLOCK_DIM x BLOCK_DIM x 1 memory access for each element in matrix C (to update value)
-  // There are total of (N / BLOCK_DIM)^2 blocks in matrix C to be computed
-  bandwidth = ((double)BLOCK_DIM*BLOCK_DIM*2 + BLOCK_DIM*BLOCK_DIM*BLOCK_DIM*2 + BLOCK_DIM*BLOCK_DIM*1) * 4 * pow((N/BLOCK_DIM), 2) / time * 1e-9;
-  // There are BLOCK_DIM x BLOCK_DIM elements in each block in C
-  // 2 flop per dot-product component (+ and *) of which there are BLOCK_DIM components. 
-  // 1 flop for updating element in C
-  // Also additional 4 more from setting up row and col index (/ and %)
-  // There are total of (N / BLOCK_DIM)^2 blocks for matrix C (i.e. the entire parent loop)
-  flops = ((double)BLOCK_DIM*BLOCK_DIM*BLOCK_DIM*2 + BLOCK_DIM*BLOCK_DIM*1 + 4) * pow((N/BLOCK_DIM), 2) / time * 1e-9;
+  // BLOCK_DIM x BLOCK_DIM memory access when copying to sub_A. Outer Loop
+  // BLOCK_DIM x BLOCK_DIM memory access when copying to sub_B. For each (N / BLOCK_DIM) column blocks in B.
+  // BLOCK_DIM x BLOCK_DIM x BLOCK_DIM x 2 when reading sub_A and sub_B. For each (N / BLOCK_DIM) column blocks in B.
+  // BLOCK_DIM x BLOCK_DIM for reading each element in C. For each (N / BLOCK_DIM) column blocks in B.
+  // There are (N / BLOCK_DIM)^2 blocks in matrix A (the Outer Loop)
+  bandwidth = (BLOCK_DIM*BLOCK_DIM + (BLOCK_DIM*BLOCK_DIM + BLOCK_DIM*BLOCK_DIM*BLOCK_DIM*2 + BLOCK_DIM*BLOCK_DIM)
+              *(N / BLOCK_DIM)) * 4 * pow((N/BLOCK_DIM), 2) / time * 1e-9;
+  // 2 flops (+, *) per dot product. Total of BLOCK_DIM x BLOCK_DIM x BLOCK_DIM x 2 flop per element in C
+  // 1 flop (+) when updating element in C. Total of BLOCK_DIM x BLOCK_DIM x 1
+  // Looped N/BLOCK_DIM times for each column block in matrix B
+  // Looped (N/BLOCK_DIM) times for all blocks in matrix A
+  flops = ((BLOCK_DIM*BLOCK_DIM*BLOCK_DIM*2 + BLOCK_DIM*BLOCK_DIM*1) * (N/BLOCK_DIM)) * pow((N/BLOCK_DIM), 2) / time * 1e-9;
   ai = flops/bandwidth;
   printf("tiling matrix results:\n");
   printf("time:%fsecs bandwidth:%fGB/s  flops:%fGFLOP/s  arithmetic_intensity:%fFLOP/byte\n", time, bandwidth, flops, ai);
